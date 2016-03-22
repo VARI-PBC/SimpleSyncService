@@ -31,10 +31,9 @@ public class Main {
         ClientBuilder builder = ClientBuilder.newBuilder();
         
         if (args.length > 1) {
-	        String[] cert = args[1].split(":");
 	        KeyStore keystore = KeyStore.getInstance("PKCS12");
-	        keystore.load(new FileInputStream(new File(cert[0])), cert[1].toCharArray());
-        	builder = builder.keyStore(keystore, cert[1]);
+	        keystore.load(new FileInputStream(new File(args[1])), args[2].toCharArray());
+        	builder = builder.keyStore(keystore, args[2]);
         }
         
         Client client = builder.build();

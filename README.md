@@ -9,9 +9,10 @@ Example was take from:
 Command line arguments are:
 
 1. the endpoint target
-2. the full path to the client .p12 (PKCS#12) certificate store and its password, separated by a colon
+2. the full path to the client .pfx/.p12 (PKCS#12) certificate store
+3. the password for the .pfx/.p12 certificate store
 
 
 Example command line:
 
-    java varipbc.Main https://host.domain.com/path/ /path/to/client-cert.p12:password
+    java varipbc.Main https://host.domain.com/path/ /path/to/client-cert.p12 password
