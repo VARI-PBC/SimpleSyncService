@@ -25,23 +25,23 @@ import com.fasterxml.jackson.databind.ObjectMapper;
  */
 public class SimpleSyncService {
 
-	@Option(name = "--help", aliases = "-h", usage = "print this message")
-	private boolean help = false;
+	@Option(name = "--help", aliases = "-h", usage = "print this message", help = true)
+	private boolean help;
 	 
 	@Option(name = "--srcUri", metaVar = "<uri>", required = true,
-	        usage = "URI of the data source endpoint")
+	        usage = "URI of the data source endpoint (required)")
 	public URI sourceUri;
 
 	@Option(name = "--srcKeystore", metaVar = "<file>",
-	        usage = "PKCS #12 file for source peer (client) certificate")
+	        usage = "PKCS #12 file for source peer (client) certificate", depends = {"--srcUri"})
 	public void setSrcKeystore(File f) {
 		sourceKeystore = Optional.of(f);
 	}
 	private Optional<File> sourceKeystore = Optional.empty();
 	
 	@Option(name = "--srcPassword", metaVar = "<password>",
-	        usage = "password for source peer (client) certificate")
-	public String sourcePassword;
+	        usage = "password for source peer (client) certificate", depends = {"--srcUri"})
+	public String sourcePassword = "";
 
 	@Option(name = "--tgtUri", metaVar = "<uri>",
 	        usage = "URI of the target endpoint")
@@ -51,14 +51,14 @@ public class SimpleSyncService {
 	private Optional<URI> targetUri = Optional.empty();
 	
 	@Option(name = "--tgtUsername", metaVar = "<username>",
-	        usage = "username for target auth")
+	        usage = "username for target auth", depends = {"--tgtUri"})
 	public void setTargetUsername(String u) {
 		targetUsername = Optional.of(u);
 	}
 	private Optional<String> targetUsername = Optional.empty();
 	
 	@Option(name = "--tgtPassword", metaVar = "<password>",
-	        usage = "password for target auth")
+	        usage = "password for target auth", depends = {"--tgtUri"})
 	public String targetPassword;
 	
     /**
@@ -69,6 +69,7 @@ public class SimpleSyncService {
         
     	final SimpleSyncService service = new SimpleSyncService();
         final CmdLineParser parser = new CmdLineParser(service);
+        parser.getProperties().withShowDefaults(false);
         try {
         	parser.parseArgument(args);
         	service.run();
@@ -76,7 +77,7 @@ public class SimpleSyncService {
         catch (CmdLineException e) {
         	System.err.println(e.getMessage());
         	System.err.println("usage: SimpleSyncService [options]");
-            parser.printUsage(System.err);
+        	parser.printUsage(System.err);
         }
         catch (Exception e) {
         	e.printStackTrace();
