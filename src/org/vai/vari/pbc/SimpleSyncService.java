@@ -17,6 +17,9 @@ import java.security.KeyStoreException;
 import java.security.cert.CertificateException;
 import java.util.Optional;
 import org.kohsuke.args4j.*;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 
@@ -61,6 +64,13 @@ public class SimpleSyncService {
 	        usage = "password for target auth", depends = {"--tgtUri"})
 	public String targetPassword;
 	
+	@Option(name = "--idField", metaVar = "<id field>",
+	        usage = "field name to use for unique ID of document", depends = {"--tgtUri"})
+	public void setIdField(String f) {
+		idField = Optional.of(f);
+	}
+	private Optional<String> idField = Optional.empty();
+	
     /**
      * Main method
      * @param args
@@ -72,6 +82,11 @@ public class SimpleSyncService {
         parser.getProperties().withShowDefaults(false);
         try {
         	parser.parseArgument(args);
+        	if (service.help) {
+        		System.err.println("usage: SimpleSyncService [options]");
+            	parser.printUsage(System.out);
+        		return;
+        	}
         	service.run();
         }
         catch (CmdLineException e) {
@@ -129,12 +144,23 @@ public class SimpleSyncService {
         	targetClient.register(feature);
         }
         
+    	JsonNode json = new ObjectMapper().readTree(sourceData);
+    	if (json.size() == 1 && json.elements().next().isArray()) {
+    		for (final JsonNode objNode : json.elements().next()) {
+    	        send(objNode, targetClient);
+    	    }
+    	}
+    }
+    
+    private void send(JsonNode data, Client client) throws JsonProcessingException {
+		String id = idField.isPresent() ? data.get(idField.get()).asText() : "";
+
         // POST
-        Response targetResponse = targetClient.target(targetUri.get())
+        Response targetResponse = client.target(targetUri.get() + id)
     			.request(MediaType.APPLICATION_JSON_TYPE)
-    			.post(Entity.entity(sourceData, MediaType.APPLICATION_JSON));
+    			.post(Entity.entity(new ObjectMapper().writeValueAsString(data), MediaType.APPLICATION_JSON));
     	System.out.println(targetResponse.getStatus());
-    	System.out.println(targetResponse.readEntity(String.class));	
+    	System.out.println(targetResponse.readEntity(String.class));    
     }
 }
 

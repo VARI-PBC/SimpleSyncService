@@ -5,6 +5,7 @@ Console app that transfers data between two REST endpoints secured by TLSv1.2. C
 ```
 usage: SimpleSyncService [options]
  --help (-h)              : print this message
+ --idField <id field>     : field name to use for unique ID of document
  --srcKeystore <file>     : PKCS #12 file for source peer (client) certificate
  --srcPassword <password> : password for source peer (client) certificate
  --srcUri <uri>           : URI of the data source endpoint (required)
