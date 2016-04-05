@@ -6,19 +6,14 @@ import javax.ws.rs.client.*;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
 import org.glassfish.jersey.client.authentication.HttpAuthenticationFeature;
+import java.security.GeneralSecurityException;
 import java.security.KeyStore;
 import java.io.File;
 import java.io.FileInputStream;
-import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.net.URI;
-import java.security.NoSuchAlgorithmException;
-import java.security.KeyStoreException;
-import java.security.cert.CertificateException;
 import java.util.Optional;
 import org.kohsuke.args4j.*;
-
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -37,10 +32,10 @@ public class SimpleSyncService {
 
 	@Option(name = "--srcKeystore", metaVar = "<file>",
 	        usage = "PKCS #12 file for source peer (client) certificate", depends = {"--srcUri"})
-	public void setSrcKeystore(File f) {
-		sourceKeystore = Optional.of(f);
+	public void setSourceKeyStore(File f) {
+		sourceKeyStore = Optional.of(f);
 	}
-	private Optional<File> sourceKeystore = Optional.empty();
+	private Optional<File> sourceKeyStore = Optional.empty();
 	
 	@Option(name = "--srcPassword", metaVar = "<password>",
 	        usage = "password for source peer (client) certificate", depends = {"--srcUri"})
@@ -71,62 +66,57 @@ public class SimpleSyncService {
 	}
 	private Optional<String> idField = Optional.empty();
 	
+	private Client sourceClient;
+	private Client targetClient;
+	
     /**
      * Main method
      * @param args
+     * @throws IOException 
+     * @throws GeneralSecurityException 
      */
-    public static void main(String[] args) {
+    public static void main(String[] args) throws GeneralSecurityException, IOException {
         
     	final SimpleSyncService service = new SimpleSyncService();
         final CmdLineParser parser = new CmdLineParser(service);
         parser.getProperties().withShowDefaults(false);
         try {
         	parser.parseArgument(args);
-        	if (service.help) {
-        		System.err.println("usage: SimpleSyncService [options]");
-            	parser.printUsage(System.out);
-        		return;
-        	}
-        	service.run();
         }
         catch (CmdLineException e) {
         	System.err.println(e.getMessage());
         	System.err.println("usage: SimpleSyncService [options]");
         	parser.printUsage(System.err);
+        	System.exit(1);
         }
-        catch (Exception e) {
-        	e.printStackTrace();
-        }
+        
+        if (service.help) {
+    		System.err.println("usage: SimpleSyncService [options]");
+        	parser.printUsage(System.out);
+    		return;
+    	}
+        
+        service.init();
+    	service.run();
     }
     
-    /**
-     * run method
-     */
-    public void run() throws KeyStoreException, NoSuchAlgorithmException, CertificateException, FileNotFoundException, IOException {
-    	
+    public void init() throws GeneralSecurityException, IOException {
+
     	System.setProperty("https.protocols", "TLSv1.2");
         ClientBuilder builder = ClientBuilder.newBuilder();
         
         // Use peer certificate authentication
-        if (sourceKeystore.isPresent()) {
+        if (sourceKeyStore.isPresent()) {
 	        KeyStore keystore = KeyStore.getInstance("PKCS12");
-	        keystore.load(new FileInputStream(sourceKeystore.get()), sourcePassword == null ? null : sourcePassword.toCharArray());
-        	builder = builder.keyStore(keystore, sourcePassword == null ? "" : sourcePassword);
+	        keystore.load(new FileInputStream(sourceKeyStore.get()), sourcePassword == null ? null : sourcePassword.toCharArray());
+        	builder.keyStore(keystore, sourcePassword == null ? "" : sourcePassword);
         }
+        sourceClient = builder.build();
         
-        // GET
-    	Response getResponse = builder.build().target(sourceUri).request().get();
-    	String sourceData = getResponse.readEntity(String.class);
-    	
-    	// pretty print JSON to console if no target specified
-    	if (!targetUri.isPresent()) {
-    		ObjectMapper mapper = new ObjectMapper();
-    		Object json = mapper.readValue(sourceData, Object.class);
-        	System.out.println(mapper.writerWithDefaultPrettyPrinter().writeValueAsString(json));
-    		return;
-    	}
-    	
-    	Client targetClient = ClientBuilder.newBuilder()
+        if (!targetUri.isPresent())
+        	return;
+        
+        targetClient = ClientBuilder.newBuilder()
     			// Set up a HostnameVerifier to work around the lack of SNI support on the production server. 
     			.hostnameVerifier(new HostnameVerifier()
         {
@@ -137,30 +127,62 @@ public class SimpleSyncService {
                 return false;
             }
         }).build();
-
+        
         // Use HTTP basic authentication
         if (targetUsername.isPresent()) {
         	HttpAuthenticationFeature feature = HttpAuthenticationFeature.basic(targetUsername.get(), targetPassword);
         	targetClient.register(feature);
         }
+    }
+    
+    /**
+     * run method
+     * @throws GeneralSecurityException 
+     * @throws IOException 
+     */
+    public int run() throws GeneralSecurityException, IOException {
+    	
+    	// GET
+    	Response response = sourceClient.target(sourceUri).request().get();
+    	int httpCode = response.getStatus();
+        if (httpCode < 200 || httpCode >= 300) {
+        	throw new IOException("unexpected response from source: " + httpCode);
+        }
+        String sourceData = response.readEntity(String.class);
+
+    	// pretty print JSON to console if no target specified
+    	if (targetClient == null) {
+    		ObjectMapper mapper = new ObjectMapper();
+    		Object json = mapper.readValue(sourceData, Object.class);
+        	System.out.println(mapper.writerWithDefaultPrettyPrinter().writeValueAsString(json));
+    		return 0;
+    	}
         
-    	JsonNode json = new ObjectMapper().readTree(sourceData);
-    	if (json.size() == 1 && json.elements().next().isArray()) {
-    		for (final JsonNode objNode : json.elements().next()) {
+    	// send
+    	JsonNode jsonRoot = new ObjectMapper().readTree(sourceData);
+    	if (jsonRoot.size() == 1 && jsonRoot.elements().next().isArray()) {
+    		for (final JsonNode objNode : jsonRoot.elements().next()) {
     	        send(objNode, targetClient);
     	    }
+    		return 203;
+    	} else {
+    		return send(jsonRoot, targetClient);
     	}
     }
     
-    private void send(JsonNode data, Client client) throws JsonProcessingException {
+    private int send(JsonNode data, Client client) throws IOException {
 		String id = idField.isPresent() ? data.get(idField.get()).asText() : "";
 
         // POST
-        Response targetResponse = client.target(targetUri.get() + id)
+        Response response = client.target(targetUri.get() + id)
     			.request(MediaType.APPLICATION_JSON_TYPE)
     			.post(Entity.entity(new ObjectMapper().writeValueAsString(data), MediaType.APPLICATION_JSON));
-    	System.out.println(targetResponse.getStatus());
-    	System.out.println(targetResponse.readEntity(String.class));    
+    	int httpCode = response.getStatus();
+        if (httpCode < 200 || httpCode >= 300) {
+        	System.err.println(response.readEntity(String.class));
+        	throw new IOException("unexpected response from target: " + httpCode);
+        }
+        return httpCode;
     }
 }
 

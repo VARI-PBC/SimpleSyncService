@@ -1,0 +1,22 @@
+---
+sourceUri     : https://source.domain.org/route/
+targetUri     : https://target.domain.org/route/
+sourceKeyStore: /path/to/certificate.pfx
+sourcePassword: password
+targetUsername: username
+targetPassword: password
+idField       : keyField
+
+# polling interval is specified in minutes
+pollingInterval: 5
+
+syncUri        : https://source.domain.org/route/
+syncKeyStore   : /path/to/certificate.pfx
+syncPassword   : password
+mailSmtpHost   : smtp.domain.org
+mailSender     : sender@domain.org
+mailRecipients : recipient@domain.org
+mailSubjSuccess: source service now available
+mailSubjFailure: source service is down
+mailBodySuccess: 
+...
