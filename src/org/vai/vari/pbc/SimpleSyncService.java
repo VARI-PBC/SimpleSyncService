@@ -161,11 +161,13 @@ public class SimpleSyncService {
     	// send
     	JsonNode jsonRoot = new ObjectMapper().readTree(sourceData);
     	if (jsonRoot.size() == 1 && jsonRoot.elements().next().isArray()) {
+    		// send multiple documents
     		for (final JsonNode objNode : jsonRoot.elements().next()) {
     	        send(objNode, targetClient);
     	    }
     		return 203;
     	} else {
+    		// send one document
     		return send(jsonRoot, targetClient);
     	}
     }

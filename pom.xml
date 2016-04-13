@@ -57,6 +57,10 @@
         	<artifactId>mail</artifactId>
         	<version>1.4.7</version>
         </dependency>
+        <dependency>
+        	<groupId>org.glassfish.jersey.media</groupId>
+        	<artifactId>jersey-media-json-jackson</artifactId>
+        </dependency>
     </dependencies>
 
     <build>

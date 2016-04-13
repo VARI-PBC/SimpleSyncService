@@ -8,6 +8,8 @@ import java.net.ConnectException;
 import java.net.URI;
 import java.security.GeneralSecurityException;
 import java.security.KeyStore;
+import java.util.Arrays;
+import java.util.List;
 import java.util.Optional;
 import java.util.Properties;
 import java.util.concurrent.ExecutionException;
@@ -15,6 +17,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 import javax.mail.Message;
 import javax.mail.MessagingException;
 import javax.mail.Session;
@@ -23,8 +26,11 @@ import javax.mail.internet.MimeMessage;
 import javax.ws.rs.ProcessingException;
 import javax.ws.rs.client.Client;
 import javax.ws.rs.client.ClientBuilder;
+import javax.ws.rs.client.Entity;
+import javax.ws.rs.core.GenericType;
+import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
-import com.fasterxml.jackson.databind.JsonNode;
+import org.glassfish.jersey.jackson.JacksonFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 
@@ -38,7 +44,7 @@ public class SimpleSyncServiceManager {
 	public String targetPassword;
 	public String idField;
 	public short pollingInterval = 5;
-	public String syncUri;
+	public URI syncUri;
 	public String syncKeyStore;
 	public String syncPassword;
 	public String mailSmtpHost;
@@ -48,6 +54,16 @@ public class SimpleSyncServiceManager {
 	public String mailSubjFailure;
 	public String mailBodySuccess;
 	private Optional<String> lastExceptionMessage = Optional.empty();
+	
+	public static class StatusRecord {
+		public String id;
+		public String lastModified;
+		public boolean synced;
+	}
+	
+	public static class WrappedJsonArray<T> {
+		public T[] d;
+	}
 	
 	public static void main(String[] args) throws IOException {
 		ObjectMapper mapper = new ObjectMapper(new YAMLFactory()); 
@@ -88,21 +104,13 @@ public class SimpleSyncServiceManager {
 	        	builder.keyStore(keystore, syncPassword == null ? "" : syncPassword);
 	        }
 	        
-	        Client client = builder.build();
-	        Response syncResponse = null;
+	        Client client = builder.register(JacksonFeature.class).build();
+	        Response response = null;
 	        try {
-	        	syncResponse = client.target(syncUri).request().get();
+	        	response = client.target(syncUri).request().get();
 	        	if (lastExceptionMessage.isPresent()) {
 	        		lastExceptionMessage = Optional.empty();
-		        	Properties props = new Properties();
-		            props.put("mail.smtp.host", mailSmtpHost);
-		            Session session = Session.getInstance(props, null);
-		            MimeMessage msg = new MimeMessage(session);
-		            msg.setFrom(mailSender);
-		            msg.setRecipients(Message.RecipientType.TO, mailRecipients);
-		            msg.setSubject(mailSubjSuccess);
-		            msg.setText(mailBodySuccess);
-		            Transport.send(msg);
+	        		sendAlert(mailSubjSuccess, mailBodySuccess);
 	        	}
 	        } catch(ProcessingException e) {
 	        	//TODO: refine recoverable error conditions
@@ -111,32 +119,43 @@ public class SimpleSyncServiceManager {
 	        	}
 	        	if (!lastExceptionMessage.isPresent() || lastExceptionMessage.get() != e.getMessage()) {
 		        	lastExceptionMessage = Optional.of(e.getMessage());
-		        	Properties props = new Properties();
-		            props.put("mail.smtp.host", mailSmtpHost);
-		            Session session = Session.getInstance(props, null);
-		            MimeMessage msg = new MimeMessage(session);
-		            msg.setFrom(mailSender);
-		            msg.setRecipients(Message.RecipientType.TO, mailRecipients);
-		            msg.setSubject(mailSubjFailure);
-		            msg.setText(e.getMessage());
-		            Transport.send(msg);
+		        	sendAlert(mailSubjFailure, e.getMessage());
 	        	}
 	        	// For recoverable errors, retry at next polling interval instead of throwing exception
 	        	return;
 	        }
-	        int httpCode = syncResponse.getStatus();
-	        if (httpCode < 200 || httpCode >= 300) {
-	        	throw new IOException("unexpected response from sync info: " + httpCode);
+	        int responseCode = response.getStatus();
+	        if (responseCode < 200 || responseCode >= 300) {
+	        	throw new IOException("unexpected response from sync status GET: " + responseCode);
 	        }
-	        String syncData = syncResponse.readEntity(String.class);
-	        JsonNode jsonRoot = new ObjectMapper().readTree(syncData);
-	    	if (jsonRoot.size() == 1 && jsonRoot.elements().next().isArray()) {
-	    		for (final JsonNode objNode : jsonRoot.elements().next()) {
-	    			String id = objNode.get(0).textValue();
-	    			service.sourceUri = this.sourceUri.resolve(id);
-	    			service.run();
-	    		}
-	    	}
+	        WrappedJsonArray<StatusRecord> wrapper = response.readEntity(new GenericType<WrappedJsonArray<StatusRecord>>() {});
+	        
+	        // filter sync list for synced==false
+	        List<StatusRecord> syncStatusList = Arrays.stream(wrapper.d)
+	        		.filter(x -> !x.synced)
+	        		.collect(Collectors.toList());
+
+	        // Send data and mark as synced
+	        for (StatusRecord syncStatus : syncStatusList) {
+	        	// Send this entity
+	        	service.sourceUri = this.sourceUri.resolve(syncStatus.id);
+    			service.run();
+    			
+    			// Update sync status
+	        	syncStatus.synced = true;
+	        	response = client.target(syncUri)
+	        			.request(MediaType.APPLICATION_JSON_TYPE)
+	        			.put(Entity.entity(syncStatus, MediaType.APPLICATION_JSON));
+	        	responseCode = response.getStatus();
+	        	if (responseCode == 409) {
+	        		// An update conflict means we should not mark it as sync'ed so that 
+	        		// we'll send it again on the next polling interval.
+	        		continue; 
+	        	}
+	        	if (responseCode < 200 || responseCode >= 300) {
+	        		throw new IOException("unexpected response from sync status PUT: " + responseCode);
+	        	}
+	        }
 		}
 		// need to wrap checked exceptions because Runnable implementations can't throw them
 		catch (IOException e) {
@@ -146,5 +165,17 @@ public class SimpleSyncServiceManager {
 		} catch (MessagingException e) {
 			throw new RuntimeException(e);
 		}
+	}
+
+	private void sendAlert(String subject, String message) throws MessagingException {
+    	Properties props = new Properties();
+        props.put("mail.smtp.host", mailSmtpHost);
+        Session session = Session.getInstance(props, null);
+        MimeMessage msg = new MimeMessage(session);
+        msg.setFrom(mailSender);
+        msg.setRecipients(Message.RecipientType.TO, mailRecipients);
+        msg.setSubject(subject);
+        msg.setText(message);
+        Transport.send(msg);
 	}
 }
