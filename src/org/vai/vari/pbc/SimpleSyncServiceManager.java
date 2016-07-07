@@ -5,9 +5,9 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.ConnectException;
-import java.net.URI;
 import java.security.GeneralSecurityException;
 import java.security.KeyStore;
+import java.time.LocalDateTime;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
@@ -30,21 +30,23 @@ import javax.ws.rs.client.Entity;
 import javax.ws.rs.core.GenericType;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
+import javax.ws.rs.core.UriBuilder;
+
 import org.glassfish.jersey.jackson.JacksonFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 
 public class SimpleSyncServiceManager {
 	
-	public URI sourceUri;
+	public String sourceUri;
 	public String sourceKeyStore;
 	public String sourcePassword;
-	public URI targetUri;
+	public String targetUri;
 	public String targetUsername;
 	public String targetPassword;
 	public String idField;
 	public short pollingInterval = 5;
-	public URI syncUri;
+	public String syncUri;
 	public String syncKeyStore;
 	public String syncPassword;
 	public String mailSmtpHost;
@@ -58,7 +60,8 @@ public class SimpleSyncServiceManager {
 	public static class StatusRecord {
 		public String id;
 		public String lastModified;
-		public boolean synced;
+		public int syncedStatus;
+		public String syncedTimestamp;
 	}
 	
 	public static class WrappedJsonArray<T> {
@@ -85,10 +88,10 @@ public class SimpleSyncServiceManager {
 
 		try {
 			SimpleSyncService service = new SimpleSyncService();
-			service.sourceUri = this.sourceUri;
+			service.sourceUri = UriBuilder.fromPath(this.sourceUri).build();
 			service.setSourceKeyStore(new File(this.sourceKeyStore));
 			service.sourcePassword = this.sourcePassword;
-			service.setTargetUri(this.targetUri);
+			service.setTargetUri(UriBuilder.fromPath(this.targetUri).build());
 			service.setTargetUsername(this.targetUsername);
 			service.targetPassword = this.targetPassword;
 			service.setIdField(this.idField);
@@ -132,17 +135,18 @@ public class SimpleSyncServiceManager {
 	        
 	        // filter sync list for synced==false
 	        List<StatusRecord> syncStatusList = Arrays.stream(wrapper.d)
-	        		.filter(x -> !x.synced)
+	        		.filter(x -> x.syncedStatus == 0)
 	        		.collect(Collectors.toList());
 
 	        // Send data and mark as synced
 	        for (StatusRecord syncStatus : syncStatusList) {
 	        	// Send this entity
-	        	service.sourceUri = this.sourceUri.resolve(syncStatus.id);
-    			service.run();
+	        	service.sourceUri = UriBuilder.fromUri(this.sourceUri).path(syncStatus.id).build();
+    			int httpCode = service.run();
     			
     			// Update sync status
-	        	syncStatus.synced = true;
+	        	syncStatus.syncedStatus = httpCode;
+	        	syncStatus.syncedTimestamp = LocalDateTime.now().toString();
 	        	response = client.target(syncUri)
 	        			.request(MediaType.APPLICATION_JSON_TYPE)
 	        			.put(Entity.entity(syncStatus, MediaType.APPLICATION_JSON));

@@ -146,7 +146,7 @@ public class SimpleSyncService {
     	Response response = sourceClient.target(sourceUri).request().get();
     	int httpCode = response.getStatus();
         if (httpCode < 200 || httpCode >= 300) {
-        	throw new IOException("unexpected response from source: " + httpCode);
+        	throw new IOException("unexpected response from '" + sourceUri + "': " + httpCode);
         }
         String sourceData = response.readEntity(String.class);
 
@@ -163,9 +163,9 @@ public class SimpleSyncService {
     	if (jsonRoot.size() == 1 && jsonRoot.elements().next().isArray()) {
     		// send multiple documents
     		for (final JsonNode objNode : jsonRoot.elements().next()) {
-    	        send(objNode, targetClient);
+    	        httpCode = send(objNode, targetClient);
     	    }
-    		return 203;
+    		return httpCode;
     	} else {
     		// send one document
     		return send(jsonRoot, targetClient);
@@ -179,12 +179,7 @@ public class SimpleSyncService {
         Response response = client.target(targetUri.get() + id)
     			.request(MediaType.APPLICATION_JSON_TYPE)
     			.post(Entity.entity(new ObjectMapper().writeValueAsString(data), MediaType.APPLICATION_JSON));
-    	int httpCode = response.getStatus();
-        if (httpCode < 200 || httpCode >= 300) {
-        	System.err.println(response.readEntity(String.class));
-        	throw new IOException("unexpected response from target: " + httpCode);
-        }
-        return httpCode;
+    	return response.getStatus();
     }
 }
 
