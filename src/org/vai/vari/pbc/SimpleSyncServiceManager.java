@@ -31,8 +31,9 @@ import javax.ws.rs.core.GenericType;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
 import javax.ws.rs.core.UriBuilder;
-
 import org.glassfish.jersey.jackson.JacksonFeature;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 
@@ -57,6 +58,8 @@ public class SimpleSyncServiceManager {
 	public String mailBodySuccess;
 	private Optional<String> lastExceptionMessage = Optional.empty();
 	
+	public Logger logger;
+	
 	public static class StatusRecord {
 		public String id;
 		public String lastModified;
@@ -69,8 +72,13 @@ public class SimpleSyncServiceManager {
 	}
 	
 	public static void main(String[] args) throws IOException {
+		String configFile = args.length > 0 ? args[0] : "SimpleSyncService.yaml";
 		ObjectMapper mapper = new ObjectMapper(new YAMLFactory()); 
-		final SimpleSyncServiceManager mgr = mapper.readValue(new File("SimpleSyncService.yaml"), SimpleSyncServiceManager.class);
+		final SimpleSyncServiceManager mgr = mapper.readValue(new File(configFile), SimpleSyncServiceManager.class);
+		mgr.logger = LoggerFactory.getLogger(SimpleSyncServiceManager.class);
+		mgr.logger.info("SimpleSyncServiceManager started.");
+		mgr.logger.info("Source URI: {}", mgr.sourceUri);
+		mgr.logger.info("Target URI: {}", mgr.targetUri);
 		ScheduledExecutorService executor = Executors.newScheduledThreadPool(1);
 		ScheduledFuture<?> future = executor.scheduleAtFixedRate(mgr::run, 0, mgr.pollingInterval, TimeUnit.MINUTES);
 		try {
@@ -142,14 +150,44 @@ public class SimpleSyncServiceManager {
 	        for (StatusRecord syncStatus : syncStatusList) {
 	        	// Send this entity
 	        	service.sourceUri = UriBuilder.fromUri(this.sourceUri).path(syncStatus.id).build();
-    			int httpCode = service.run();
+	        	try {
+	        		response = service.run();
+	        	} catch(ProcessingException e) {
+		        	//TODO: refine recoverable error conditions
+		        	if (!(e.getCause() instanceof ConnectException)) {
+		        		throw e;
+		        	}
+		        	// For recoverable errors, retry at next polling interval instead of throwing exception
+		        	return;
+		        }
+    			responseCode = response.getStatus();
+    			logger.info("key: {}, response: {}.", syncStatus.id, responseCode);
+    			if (responseCode >= 400) {
+    				String responseMsg = response.readEntity(String.class);
+    				logger.error("Error message from target: {}", responseMsg);
+    			
+    				if (responseCode == 500) {
+    					sendAlert(mailSubjFailure, "Server error from target '" + service.getTargetUri() + "', response: "
+    							+ responseMsg);
+    				}
+    			}
     			
     			// Update sync status
-	        	syncStatus.syncedStatus = httpCode;
+	        	syncStatus.syncedStatus = responseCode;
 	        	syncStatus.syncedTimestamp = LocalDateTime.now().toString();
-	        	response = client.target(syncUri)
+	        	try {
+	        		response = client.target(syncUri)
 	        			.request(MediaType.APPLICATION_JSON_TYPE)
 	        			.put(Entity.entity(syncStatus, MediaType.APPLICATION_JSON));
+		        } catch(ProcessingException e) {
+		        	//TODO: refine recoverable error conditions
+		        	if (!(e.getCause() instanceof ConnectException)) {
+		        		throw e;
+		        	}
+		        	sendAlert(mailSubjFailure, e.getMessage());
+		        	// For recoverable errors, retry at next polling interval instead of throwing exception
+		        	return;
+		        }
 	        	responseCode = response.getStatus();
 	        	if (responseCode == 409) {
 	        		// An update conflict means we should not mark it as sync'ed so that 

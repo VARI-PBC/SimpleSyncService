@@ -5,6 +5,7 @@ import javax.net.ssl.*;
 import javax.ws.rs.client.*;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
+import javax.ws.rs.core.UriBuilder;
 import org.glassfish.jersey.client.authentication.HttpAuthenticationFeature;
 import java.security.GeneralSecurityException;
 import java.security.KeyStore;
@@ -14,6 +15,9 @@ import java.io.IOException;
 import java.net.URI;
 import java.util.Optional;
 import org.kohsuke.args4j.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -41,6 +45,9 @@ public class SimpleSyncService {
 	        usage = "password for source peer (client) certificate", depends = {"--srcUri"})
 	public String sourcePassword = "";
 
+	public URI getTargetUri() {
+		return targetUri.get();
+	}
 	@Option(name = "--tgtUri", metaVar = "<uri>",
 	        usage = "URI of the target endpoint")
 	public void setTargetUri(URI uri) {
@@ -96,8 +103,13 @@ public class SimpleSyncService {
     		return;
     	}
         
+    	Logger logger = LoggerFactory.getLogger(SimpleSyncService.class);
         service.init();
-    	service.run();
+    	Response response = service.run();
+    	int responseCode = response.getStatus();
+    	logger.info("HTTP status code: {}", responseCode);
+    	String responseMsg = response.readEntity(String.class);
+    	logger.info("HTTP response mesage: {}", responseMsg);
     }
     
     public void init() throws GeneralSecurityException, IOException {
@@ -140,7 +152,7 @@ public class SimpleSyncService {
      * @throws GeneralSecurityException 
      * @throws IOException 
      */
-    public int run() throws GeneralSecurityException, IOException {
+    public Response run() throws GeneralSecurityException, IOException {
     	
     	// GET
     	Response response = sourceClient.target(sourceUri).request().get();
@@ -155,7 +167,7 @@ public class SimpleSyncService {
     		ObjectMapper mapper = new ObjectMapper();
     		Object json = mapper.readValue(sourceData, Object.class);
         	System.out.println(mapper.writerWithDefaultPrettyPrinter().writeValueAsString(json));
-    		return 0;
+    		return response;
     	}
         
     	// send
@@ -163,23 +175,22 @@ public class SimpleSyncService {
     	if (jsonRoot.size() == 1 && jsonRoot.elements().next().isArray()) {
     		// send multiple documents
     		for (final JsonNode objNode : jsonRoot.elements().next()) {
-    	        httpCode = send(objNode, targetClient);
+    	        response = send(objNode, targetClient);
     	    }
-    		return httpCode;
+    		return response;
     	} else {
     		// send one document
     		return send(jsonRoot, targetClient);
     	}
     }
     
-    private int send(JsonNode data, Client client) throws IOException {
+    private Response send(JsonNode data, Client client) throws IOException {
 		String id = idField.isPresent() ? data.get(idField.get()).asText() : "";
 
         // POST
-        Response response = client.target(targetUri.get() + id)
+        return client.target(UriBuilder.fromUri(targetUri.get()).path(id).build())
     			.request(MediaType.APPLICATION_JSON_TYPE)
     			.post(Entity.entity(new ObjectMapper().writeValueAsString(data), MediaType.APPLICATION_JSON));
-    	return response.getStatus();
     }
 }
 

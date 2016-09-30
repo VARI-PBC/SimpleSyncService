@@ -61,6 +61,11 @@
         	<groupId>org.glassfish.jersey.media</groupId>
         	<artifactId>jersey-media-json-jackson</artifactId>
         </dependency>
+        <dependency>
+        	<groupId>ch.qos.logback</groupId>
+        	<artifactId>logback-classic</artifactId>
+        	<version>1.0.13</version>
+        </dependency>
     </dependencies>
 
     <build>
