@@ -51,7 +51,7 @@ public class SimpleSyncService {
 	@Option(name = "--tgtUri", metaVar = "<uri>",
 	        usage = "URI of the target endpoint")
 	public void setTargetUri(URI uri) {
-		targetUri = Optional.of(uri);
+		targetUri = uri == null ? Optional.empty() : Optional.of(uri);
 	}
 	private Optional<URI> targetUri = Optional.empty();
 	

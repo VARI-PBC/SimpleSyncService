@@ -8,21 +8,27 @@ import java.net.ConnectException;
 import java.security.GeneralSecurityException;
 import java.security.KeyStore;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 import java.util.Properties;
+import java.util.TimeZone;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
 import javax.mail.Message;
 import javax.mail.MessagingException;
 import javax.mail.Session;
 import javax.mail.Transport;
 import javax.mail.internet.MimeMessage;
+import javax.net.ssl.HostnameVerifier;
+import javax.net.ssl.SSLSession;
 import javax.ws.rs.ProcessingException;
 import javax.ws.rs.client.Client;
 import javax.ws.rs.client.ClientBuilder;
@@ -31,9 +37,13 @@ import javax.ws.rs.core.GenericType;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
 import javax.ws.rs.core.UriBuilder;
+
+import org.glassfish.jersey.client.authentication.HttpAuthenticationFeature;
 import org.glassfish.jersey.jackson.JacksonFeature;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 
@@ -58,6 +68,8 @@ public class SimpleSyncServiceManager {
 	public String mailBodySuccess;
 	private Optional<String> lastExceptionMessage = Optional.empty();
 	
+	public String mruTimestamp;
+	public boolean optionSyncOnce;
 	public Logger logger;
 	
 	public static class StatusRecord {
@@ -72,6 +84,9 @@ public class SimpleSyncServiceManager {
 	}
 	
 	public static void main(String[] args) throws IOException {
+		 TimeZone timeZone = TimeZone.getTimeZone("UTC");
+		 TimeZone.setDefault(timeZone);
+
 		String configFile = args.length > 0 ? args[0] : "SimpleSyncService.yaml";
 		ObjectMapper mapper = new ObjectMapper(new YAMLFactory()); 
 		final SimpleSyncServiceManager mgr = mapper.readValue(new File(configFile), SimpleSyncServiceManager.class);
@@ -92,65 +107,167 @@ public class SimpleSyncServiceManager {
 		}
 	}
 	
+    public Client initSource() throws GeneralSecurityException, IOException {
+
+    	System.setProperty("https.protocols", "TLSv1.2");
+        ClientBuilder builder = ClientBuilder.newBuilder()
+        		// Set up a HostnameVerifier to allow 'localhost' for debugging purposes
+    			.hostnameVerifier(new HostnameVerifier()
+        {
+    		public boolean verify(String hostname, SSLSession session)
+            {
+                if (hostname.equals(UriBuilder.fromPath(sourceUri).build().getHost()))
+                    return true;
+                else if (hostname.equals("localhost"))
+                	return true;
+                return false;
+            }
+        });
+        
+        
+        // Use peer certificate authentication
+        if (!this.sourceKeyStore.isEmpty()) {
+	        KeyStore keystore = KeyStore.getInstance("PKCS12");
+	        keystore.load(new FileInputStream(this.sourceKeyStore), this.sourcePassword == null ? null : this.sourcePassword.toCharArray());
+        	builder.keyStore(keystore, this.sourcePassword == null ? "" : this.sourcePassword);
+        }
+        return builder.build();
+    }
+    
+    public Client initTarget() {
+        
+    	if (this.targetUri.isEmpty()) return null;
+    	
+        Client client = ClientBuilder.newBuilder()
+    			// Set up a HostnameVerifier to work around the lack of SNI support on the production server. 
+    			.hostnameVerifier(new HostnameVerifier()
+        {
+    		public boolean verify(String hostname, SSLSession session)
+            {
+                if (hostname.equals(UriBuilder.fromPath(targetUri).build().getHost()))
+                    return true;
+                return false;
+            }
+        }).build();
+        
+        // Use HTTP basic authentication
+        if (!this.targetUsername.isEmpty()) {
+        	HttpAuthenticationFeature feature = HttpAuthenticationFeature.basic(this.targetUsername, this.targetPassword);
+        	client.register(feature);
+        }
+        return client;
+    }
+    
+    public Client initSync() throws GeneralSecurityException, IOException {
+    	ClientBuilder builder = ClientBuilder.newBuilder()
+        		// Set up a HostnameVerifier to allow 'localhost' for debugging purposes
+    			.hostnameVerifier(new HostnameVerifier()
+        {
+    		public boolean verify(String hostname, SSLSession session)
+            {
+                if (hostname.equals(UriBuilder.fromPath(syncUri).build().getHost()))
+                    return true;
+                else if (hostname.equals("localhost"))
+                	return true;
+                return false;
+            }
+        });
+        
+        // Use peer certificate authentication
+        if (this.syncKeyStore != null) {
+	        KeyStore keystore = KeyStore.getInstance("PKCS12");
+	        keystore.load(new FileInputStream(this.syncKeyStore), this.syncPassword == null ? null : this.syncPassword.toCharArray());
+        	builder.keyStore(keystore, this.syncPassword == null ? "" : this.syncPassword);
+        }
+        
+        return builder.register(JacksonFeature.class).build();
+    }
+    
 	public void run() {
 
 		try {
+			System.setProperty("https.protocols", "TLSv1.2");
+	        
+			Client sourceClient = initSource();
+			Client syncClient = initSync();
+        	
+			// The highest sync'ed lastModified time only needs to be retrieved on the first run after startup.
+		    if (mruTimestamp == null) {
+				mruTimestamp = "0001-01-01T00:00:00.000Z";
+				Optional<StatusRecord> maxStatus = getSyncRecords(syncClient)
+						.filter(s -> s.syncedStatus != 0)
+						.max((s1, s2) -> s1.lastModified.compareTo(s2.lastModified));
+				if (maxStatus.isPresent()) mruTimestamp = maxStatus.get().lastModified;
+			}
+			
+
+	        //
+		    // reset sync status for modified docs
+		    //
+	        for (final JsonNode doc : getModifiedDocuments(sourceClient)) {
+	        	JsonNode idNode = doc.get(this.idField);
+	        	if (idNode == null) throw new IllegalArgumentException("idField : "+idField);
+	        	String id = idNode.asText();
+        		String lastModified = sourceUri.contains("/images") ? 
+        				doc.get("ModifiedOn").asText() : // hack because the CDR won't let us rename this field
+        				doc.get("lastModified").asText();
+        		if (lastModified.compareTo(this.mruTimestamp) > 0) this.mruTimestamp = lastModified;
+            	
+            	// reset sync status
+            	StatusRecord syncStatus = new StatusRecord();
+    			syncStatus.id = id;
+    			syncStatus.lastModified = lastModified;
+	        	syncStatus.syncedStatus = 0;
+	        	syncStatus.syncedTimestamp = null;
+	        	Response response = null;
+				try {
+	        		javax.ws.rs.client.Invocation.Builder builder = 
+        				syncClient.target(this.syncUri).request(MediaType.APPLICATION_JSON_TYPE);
+	        		// POST should return 409 if it already exists
+	        		// PUT will update lastModified and reset sync status unconditionally
+	        		response = optionSyncOnce ? builder.post(Entity.entity(syncStatus, MediaType.APPLICATION_JSON))
+	        				: builder.put(Entity.entity(syncStatus, MediaType.APPLICATION_JSON));
+		        } catch(ProcessingException e) {
+		        	//TODO: refine recoverable error conditions
+		        	if (!(e.getCause() instanceof ConnectException)) {
+		        		throw e;
+		        	}
+		        	sendAlert(mailSubjFailure, e.getMessage());
+		        	// For recoverable errors, retry at next polling interval instead of throwing exception
+		        	return;
+		        }
+	        	int responseCode = response.getStatus();
+	        	if (responseCode == 409) {
+	        		// We'll should get an update conflict on a POST when the status record already exists.
+	        		continue; 
+	        	}
+	        	if (responseCode < 200 || responseCode >= 300) {
+	        		throw new IOException("unexpected response from sync status PUT: " + responseCode);
+	        	}	        	
+	        }
+	        
+	        
+	        //
+	        // Send data and mark as sync'ed
+	        //
 			SimpleSyncService service = new SimpleSyncService();
 			service.sourceUri = UriBuilder.fromPath(this.sourceUri).build();
 			service.setSourceKeyStore(new File(this.sourceKeyStore));
 			service.sourcePassword = this.sourcePassword;
-			service.setTargetUri(UriBuilder.fromPath(this.targetUri).build());
+			service.setTargetUri(this.targetUri.isEmpty() ? null : UriBuilder.fromPath(this.targetUri).build());
 			service.setTargetUsername(this.targetUsername);
 			service.targetPassword = this.targetPassword;
 			service.setIdField(this.idField);
 			service.init();
 			
-			System.setProperty("https.protocols", "TLSv1.2");
-	        ClientBuilder builder = ClientBuilder.newBuilder();
-	        
-	        // Use peer certificate authentication
-	        if (syncKeyStore != null) {
-		        KeyStore keystore = KeyStore.getInstance("PKCS12");
-		        keystore.load(new FileInputStream(syncKeyStore), syncPassword == null ? null : syncPassword.toCharArray());
-	        	builder.keyStore(keystore, syncPassword == null ? "" : syncPassword);
-	        }
-	        
-	        Client client = builder.register(JacksonFeature.class).build();
-	        Response response = null;
-	        try {
-	        	response = client.target(syncUri).request().get();
-	        	if (lastExceptionMessage.isPresent()) {
-	        		lastExceptionMessage = Optional.empty();
-	        		sendAlert(mailSubjSuccess, mailBodySuccess);
-	        	}
-	        } catch(ProcessingException e) {
-	        	//TODO: refine recoverable error conditions
-	        	if (!(e.getCause() instanceof ConnectException)) {
-	        		throw e;
-	        	}
-	        	if (!lastExceptionMessage.isPresent() || lastExceptionMessage.get() != e.getMessage()) {
-		        	lastExceptionMessage = Optional.of(e.getMessage());
-		        	sendAlert(mailSubjFailure, e.getMessage());
-	        	}
-	        	// For recoverable errors, retry at next polling interval instead of throwing exception
-	        	return;
-	        }
-	        int responseCode = response.getStatus();
-	        if (responseCode < 200 || responseCode >= 300) {
-	        	throw new IOException("unexpected response from sync status GET: " + responseCode);
-	        }
-	        WrappedJsonArray<StatusRecord> wrapper = response.readEntity(new GenericType<WrappedJsonArray<StatusRecord>>() {});
-	        
-	        // filter sync list for synced==false
-	        List<StatusRecord> syncStatusList = Arrays.stream(wrapper.d)
-	        		.filter(x -> x.syncedStatus == 0)
-	        		.collect(Collectors.toList());
-
-	        // Send data and mark as synced
-	        for (StatusRecord syncStatus : syncStatusList) {
+	        List<StatusRecord> syncStatusList = getSyncRecords(syncClient)
+					.filter(s -> s.syncedStatus == 0)
+					.collect(Collectors.toList());
+	        for (StatusRecord syncStatus : syncStatusList) {        	
 	        	// Send this entity
 	        	service.sourceUri = UriBuilder.fromUri(this.sourceUri).path(syncStatus.id).build();
-	        	try {
+	        	Response response = null;
+				try {
 	        		response = service.run();
 	        	} catch(ProcessingException e) {
 		        	//TODO: refine recoverable error conditions
@@ -160,7 +277,7 @@ public class SimpleSyncServiceManager {
 		        	// For recoverable errors, retry at next polling interval instead of throwing exception
 		        	return;
 		        }
-    			responseCode = response.getStatus();
+    			int responseCode = response.getStatus();
     			logger.info("key: {}, response: {}.", syncStatus.id, responseCode);
     			if (responseCode >= 400) {
     				String responseMsg = response.readEntity(String.class);
@@ -176,7 +293,7 @@ public class SimpleSyncServiceManager {
 	        	syncStatus.syncedStatus = responseCode;
 	        	syncStatus.syncedTimestamp = LocalDateTime.now().toString();
 	        	try {
-	        		response = client.target(syncUri)
+	        		response = syncClient.target(syncUri)
 	        			.request(MediaType.APPLICATION_JSON_TYPE)
 	        			.put(Entity.entity(syncStatus, MediaType.APPLICATION_JSON));
 		        } catch(ProcessingException e) {
@@ -189,14 +306,9 @@ public class SimpleSyncServiceManager {
 		        	return;
 		        }
 	        	responseCode = response.getStatus();
-	        	if (responseCode == 409) {
-	        		// An update conflict means we should not mark it as sync'ed so that 
-	        		// we'll send it again on the next polling interval.
-	        		continue; 
-	        	}
 	        	if (responseCode < 200 || responseCode >= 300) {
 	        		throw new IOException("unexpected response from sync status PUT: " + responseCode);
-	        	}
+	        	}	        	
 	        }
 		}
 		// need to wrap checked exceptions because Runnable implementations can't throw them
@@ -207,6 +319,57 @@ public class SimpleSyncServiceManager {
 		} catch (MessagingException e) {
 			throw new RuntimeException(e);
 		}
+	}
+
+	private JsonNode getModifiedDocuments(Client client) throws IOException {
+		// GET
+    	Response response = client.target(this.sourceUri).queryParam("starttime", this.mruTimestamp).request().get();
+    	int httpCode = response.getStatus();
+        if (httpCode < 200 || httpCode >= 300) {
+        	throw new IOException("unexpected response from '" + sourceUri + "': " + httpCode);
+        }
+        String sourceData = response.readEntity(String.class);
+        JsonNode jsonRoot = new ObjectMapper().readTree(sourceData);
+        if (jsonRoot.size() == 1 && jsonRoot.elements().next().isArray()) {
+        	return jsonRoot.elements().next();        	
+        }
+        return jsonRoot;
+	}
+	
+	private Stream<StatusRecord> getSyncRecords(Client client) throws MessagingException, IOException {
+		
+		//TODO: get latest modified timestamp
+		
+        Response response = null;
+        try {
+        	response = client.target(syncUri).request().get();
+        	if (lastExceptionMessage.isPresent()) {
+        		lastExceptionMessage = Optional.empty();
+        		sendAlert(mailSubjSuccess, mailBodySuccess);
+        	}
+        } catch(ProcessingException e) {
+        	//TODO: refine recoverable error conditions
+        	if (!(e.getCause() instanceof ConnectException)) {
+        		throw e;
+        	}
+        	if (!lastExceptionMessage.isPresent() || lastExceptionMessage.get() != e.getMessage()) {
+	        	lastExceptionMessage = Optional.of(e.getMessage());
+	        	sendAlert(mailSubjFailure, e.getMessage());
+        	}
+        	// For recoverable errors, retry at next polling interval instead of throwing exception
+        	return new ArrayList<StatusRecord>().stream();
+        }
+        int responseCode = response.getStatus();
+        if (responseCode < 200 || responseCode >= 300) {
+        	throw new IOException("unexpected response from sync status GET: " + responseCode);
+        }
+        WrappedJsonArray<StatusRecord> wrapper = response.readEntity(new GenericType<WrappedJsonArray<StatusRecord>>() {});
+        
+        // filter sync list for synced==false
+        Stream<StatusRecord> syncStatusList = Arrays.stream(wrapper.d);
+        		//.filter(x -> x.syncedStatus == 0)
+        		//.collect(Collectors.toList());
+        return syncStatusList;
 	}
 
 	private void sendAlert(String subject, String message) throws MessagingException {
