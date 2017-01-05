@@ -9,6 +9,7 @@ idField       : keyField
 
 # polling interval is specified in minutes
 pollingInterval: 5
+optionSyncOnce : false
 
 syncUri        : https://source.domain.org/route/
 syncKeyStore   : /path/to/certificate.pfx
