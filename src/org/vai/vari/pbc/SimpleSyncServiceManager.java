@@ -190,7 +190,7 @@ public class SimpleSyncServiceManager {
 	        
 			Client sourceClient = initSource();
 			Client syncClient = initSync();
-        	
+			
 			// The highest sync'ed lastModified time only needs to be retrieved on the first run after startup.
 		    if (mruTimestamp == null) {
 				mruTimestamp = "0001-01-01T00:00:00.000Z";
@@ -200,17 +200,26 @@ public class SimpleSyncServiceManager {
 				if (maxStatus.isPresent()) mruTimestamp = maxStatus.get().lastModified;
 			}
 			
+		    List<String> keysToRemove = getSyncRecords(syncClient, mruTimestamp)
+		    		.map(s -> s.id)
+		    		.collect(Collectors.toList());
 
 	        //
 		    // reset sync status for modified docs
 		    //
 	        for (final JsonNode doc : getModifiedDocuments(sourceClient)) {
+	        	// get the ID field as specified in the config
 	        	JsonNode idNode = doc.get(this.idField);
 	        	if (idNode == null) throw new IllegalArgumentException("idField : "+idField);
 	        	String id = idNode.asText();
-        		String lastModified = sourceUri.contains("/images") ? 
+        		
+	        	// skip the records that match the mruTimestamp and have already been sync'ed
+	        	if (keysToRemove.contains(id)) continue;
+	        	
+	        	String lastModified = sourceUri.contains("/images") ? 
         				doc.get("ModifiedOn").asText() : // hack because the CDR won't let us rename this field
         				doc.get("lastModified").asText();
+        		// OK to update mruTimestamp now since we've already run the query
         		if (lastModified.compareTo(this.mruTimestamp) > 0) this.mruTimestamp = lastModified;
             	
             	// reset sync status
@@ -337,12 +346,17 @@ public class SimpleSyncServiceManager {
 	}
 	
 	private Stream<StatusRecord> getSyncRecords(Client client) throws MessagingException, IOException {
-		
-		//TODO: get latest modified timestamp
-		
+		return getSyncRecords(client, null);
+	}
+	
+	private Stream<StatusRecord> getSyncRecords(Client client, String date) throws MessagingException, IOException {
+						
         Response response = null;
         try {
-        	response = client.target(syncUri).request().get();
+        	UriBuilder syncUriBuilder = UriBuilder.fromUri(syncUri);
+        	if (date != null && !date.isEmpty())
+        		syncUriBuilder = syncUriBuilder.queryParam("starttime", date);
+        	response = client.target(syncUriBuilder.build()).request().get();
         	if (lastExceptionMessage.isPresent()) {
         		lastExceptionMessage = Optional.empty();
         		sendAlert(mailSubjSuccess, mailBodySuccess);
