@@ -99,9 +99,11 @@ public class SimpleSyncServiceManager {
 		try {
 			future.get(); // need this to retrieve any exceptions
 		} catch (InterruptedException e) {
-			e.printStackTrace();
+			mgr.logger.error(e.toString());
 		} catch (ExecutionException e) {
-			e.getCause().printStackTrace();
+			mgr.logger.error(e.getCause().toString());
+		} catch (Exception e) {
+			mgr.logger.error(e.toString());
 		} finally {
 			executor.shutdown(); // process will not terminate without this
 		}
