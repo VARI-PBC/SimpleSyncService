@@ -3,11 +3,12 @@ package org.vai.vari.pbc;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
+import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.io.UncheckedIOException;
 import java.net.ConnectException;
 import java.security.GeneralSecurityException;
 import java.security.KeyStore;
-import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -21,7 +22,6 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
-
 import javax.mail.Message;
 import javax.mail.MessagingException;
 import javax.mail.Session;
@@ -94,16 +94,26 @@ public class SimpleSyncServiceManager {
 		mgr.logger.info("SimpleSyncServiceManager started.");
 		mgr.logger.info("Source URI: {}", mgr.sourceUri);
 		mgr.logger.info("Target URI: {}", mgr.targetUri);
+		mgr.mruTimestamp = null;
 		ScheduledExecutorService executor = Executors.newScheduledThreadPool(1);
 		ScheduledFuture<?> future = executor.scheduleAtFixedRate(mgr::run, 0, mgr.pollingInterval, TimeUnit.MINUTES);
 		try {
 			future.get(); // need this to retrieve any exceptions
 		} catch (InterruptedException e) {
-			mgr.logger.error(e.toString());
+			StringWriter sw = new StringWriter();
+			PrintWriter pw = new PrintWriter(sw);
+			e.printStackTrace(pw);
+			mgr.logger.error(sw.toString());
 		} catch (ExecutionException e) {
-			mgr.logger.error(e.getCause().toString());
+			StringWriter sw = new StringWriter();
+			PrintWriter pw = new PrintWriter(sw);
+			e.getCause().printStackTrace(pw);
+			mgr.logger.error(sw.toString());
 		} catch (Exception e) {
-			mgr.logger.error(e.toString());
+			StringWriter sw = new StringWriter();
+			PrintWriter pw = new PrintWriter(sw);
+			e.printStackTrace(pw);
+			mgr.logger.error(sw.toString());
 		} finally {
 			executor.shutdown(); // process will not terminate without this
 		}
@@ -193,36 +203,30 @@ public class SimpleSyncServiceManager {
 			Client sourceClient = initSource();
 			Client syncClient = initSync();
 			
-			// The highest sync'ed lastModified time only needs to be retrieved on the first run after startup.
-		    if (mruTimestamp == null) {
-				mruTimestamp = "0001-01-01T00:00:00.000Z";
-				Optional<StatusRecord> maxStatus = getSyncRecords(syncClient)
-						.filter(s -> s.syncedStatus != 0)
-						.max((s1, s2) -> s1.lastModified.compareTo(s2.lastModified));
-				if (maxStatus.isPresent()) mruTimestamp = maxStatus.get().lastModified;
-			}
-			
+			// On first run after startup, mruTimestamp will be null and this will 
+			// attempt to sync everything that hasn't already been sync'd.
 		    List<String> keysToRemove = getSyncRecords(syncClient, mruTimestamp)
-		    		.map(s -> s.id)
+		    		.map(s -> optionSyncOnce ? s.id : s.id + "|" + s.lastModified)
 		    		.collect(Collectors.toList());
 
-	        //
+		    //
 		    // reset sync status for modified docs
 		    //
-	        for (final JsonNode doc : getModifiedDocuments(sourceClient)) {
+	        for (final JsonNode doc : getModifiedDocuments(sourceClient, mruTimestamp)) {
 	        	// get the ID field as specified in the config
 	        	JsonNode idNode = doc.get(this.idField);
 	        	if (idNode == null) throw new IllegalArgumentException("idField : "+idField);
 	        	String id = idNode.asText();
-        		
-	        	// skip the records that match the mruTimestamp and have already been sync'ed
-	        	if (keysToRemove.contains(id)) continue;
 	        	
 	        	String lastModified = sourceUri.contains("/images") ? 
         				doc.get("ModifiedOn").asText() : // hack because the CDR won't let us rename this field
         				doc.get("lastModified").asText();
+        				
+	        	// skip the records that have already been sync'ed
+	        	if (keysToRemove.contains(optionSyncOnce ? id : id + "|" + lastModified)) continue;
+
         		// OK to update mruTimestamp now since we've already run the query
-        		if (lastModified.compareTo(this.mruTimestamp) > 0) this.mruTimestamp = lastModified;
+        		if (mruTimestamp == null || lastModified.compareTo(mruTimestamp) > 0) mruTimestamp = lastModified;
             	
             	// reset sync status
             	StatusRecord syncStatus = new StatusRecord();
@@ -256,8 +260,7 @@ public class SimpleSyncServiceManager {
 	        		throw new IOException("unexpected response from sync status PUT: " + responseCode);
 	        	}	        	
 	        }
-	        
-	        
+	        /*
 	        //
 	        // Send data and mark as sync'ed
 	        //
@@ -321,6 +324,7 @@ public class SimpleSyncServiceManager {
 	        		throw new IOException("unexpected response from sync status PUT: " + responseCode);
 	        	}	        	
 	        }
+	        */
 		}
 		// need to wrap checked exceptions because Runnable implementations can't throw them
 		catch (IOException e) {
@@ -332,9 +336,9 @@ public class SimpleSyncServiceManager {
 		}
 	}
 
-	private JsonNode getModifiedDocuments(Client client) throws IOException {
+	private JsonNode getModifiedDocuments(Client client, String date) throws IOException {
 		// GET
-    	Response response = client.target(this.sourceUri).queryParam("starttime", this.mruTimestamp).request().get();
+    	Response response = client.target(this.sourceUri).queryParam("starttime", date).request().get();
     	int httpCode = response.getStatus();
         if (httpCode < 200 || httpCode >= 300) {
         	throw new IOException("unexpected response from '" + sourceUri + "': " + httpCode);
