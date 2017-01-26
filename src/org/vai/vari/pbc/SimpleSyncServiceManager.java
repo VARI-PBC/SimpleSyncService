@@ -9,6 +9,7 @@ import java.io.UncheckedIOException;
 import java.net.ConnectException;
 import java.security.GeneralSecurityException;
 import java.security.KeyStore;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -260,7 +261,7 @@ public class SimpleSyncServiceManager {
 	        		throw new IOException("unexpected response from sync status PUT: " + responseCode);
 	        	}	        	
 	        }
-	        /*
+	        
 	        //
 	        // Send data and mark as sync'ed
 	        //
@@ -324,7 +325,6 @@ public class SimpleSyncServiceManager {
 	        		throw new IOException("unexpected response from sync status PUT: " + responseCode);
 	        	}	        	
 	        }
-	        */
 		}
 		// need to wrap checked exceptions because Runnable implementations can't throw them
 		catch (IOException e) {
